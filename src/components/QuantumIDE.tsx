@@ -10,6 +10,7 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
+import QuantumTerminal from './terminal/QuantumTerminal';
 
 function levenshteinDistance(left: string, right: string) {
   if (!left.length) return right.length;
@@ -534,43 +535,8 @@ srv.start();`
                     Clear
                   </button>
                 </div>
-                <div className="flex-1 p-4 md:p-5 font-mono text-[10px] md:text-xs text-green-600 dark:text-green-400 overflow-auto custom-scrollbar">
-                  {output.length === 0 ? (
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 text-black/30 dark:text-white/30">
-                        <span className="text-cyan-500">➜</span>
-                        <span>Quantum Runtime Environment [Version 2.0.4]</span>
-                      </div>
-                      <div className="flex items-center gap-2 text-black/20 dark:text-white/20 italic">
-                        <span className="text-cyan-500">➜</span>
-                        <span>Ready for execution. Click 'RUN SCRIPT' to begin...</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-1">
-                      {output.map((line, i) => (
-                        <div key={i} className={cn(
-                          "flex items-start gap-2",
-                          line.includes('Error') ? 'text-red-500' : ''
-                        )}>
-                          <span className="text-cyan-500/50 shrink-0">➜</span>
-                          <span className={cn(
-                            line.startsWith('Compiling') || line.startsWith('Linking') || line.startsWith('Executing') 
-                              ? "text-cyan-600 dark:text-cyan-400 font-bold"
-                              : ""
-                          )}>
-                            {line}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {isExecuting && (
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-cyan-500/50">➜</span>
-                      <span className="w-2 h-4 bg-cyan-500 animate-pulse" />
-                    </div>
-                  )}
+                <div className="flex-1 overflow-hidden">
+                  <QuantumTerminal files={files} activeFile={activeFile} theme={theme} />
                 </div>
               </div>
             </div>
