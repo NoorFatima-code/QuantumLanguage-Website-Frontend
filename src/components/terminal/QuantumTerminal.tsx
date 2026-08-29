@@ -128,7 +128,7 @@ export default function QuantumTerminal({ files, activeFile, onRun, theme = "dar
     const getPrompt = () => (activeFileRef.current ? `[${activeFileRef.current}] $ ` : '$ ');
 
     term.writeln('\x1b[36mQuantum Terminal\x1b[0m  v2.0.4');
-    term.writeln('Type `quantum <file>.sa` or `qrun <file>.sa` to run a program. Type `help` for shortcuts.');
+    term.writeln('Type `quantum <file>` (e.g. `quantum main.sa` or `quantum ruby_demo.rb`) to run. Type `help` for shortcuts.');
     term.writeln('');
     term.write(getPrompt());
 
@@ -243,7 +243,7 @@ export default function QuantumTerminal({ files, activeFile, onRun, theme = "dar
       }
 
       if (!fileName) {
-        term.writeln(`Usage: ${action} <filename>.sa`);
+        term.writeln(`Usage: ${action} <filename> (e.g. main.sa, script.rb)`);
         term.write(getPrompt());
         return;
       }
@@ -271,8 +271,13 @@ export default function QuantumTerminal({ files, activeFile, onRun, theme = "dar
         return;
       }
 
+      // Extract extension (e.g. .rb, .sa, .js, .py, .cpp)
+      const fileExt = filePath.includes('.')
+        ? filePath.substring(filePath.lastIndexOf('.'))
+        : '.sa';
+
       // Execute via socket (connects automatically if needed)
-      socketManager.runScript(code);
+      socketManager.runScript(code, fileExt);
     };
 
     // Setup output streaming from socket manager
@@ -325,7 +330,7 @@ export default function QuantumTerminal({ files, activeFile, onRun, theme = "dar
         } else {
           // Print the command echo first, then the help message
           term.writeln(command);
-          term.writeln(`Type \`quantum <file>.sa\` or \`qrun <file>.sa\` to run.`);
+          term.writeln(`Type \`quantum <file>\` or \`qrun <file>\` to run (e.g. main.sa, ruby_demo.rb).`);
         }
       }
 
