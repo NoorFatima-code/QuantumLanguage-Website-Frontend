@@ -3,12 +3,15 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { cn } from '../../lib/utils';
-import { socketManager } from '../../socket/socketManager';
+import { socketManager, type ProcessExit } from '../../socket/socketManager';
+import { env } from '../../config/env';
 
 interface QuantumTerminalProps {
   files: Record<string, string>;
   activeFile?: string;
   onRun?: (file: string) => void;
+  /** A program started (true) or ended (false). */
+  onRunningChange?: (running: boolean) => void;
   theme?: "dark" | "light";
 }
 
@@ -50,18 +53,19 @@ const findNextWordBoundary = (text: string, pos: number) => {
 
 export interface QuantumTerminalHandle {
   runFile: (file: string) => void;
+  stop: () => void;
   clear: () => void;
 }
 
 const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>(
-  function QuantumTerminalComponent({ files, activeFile, onRun, theme = "dark" }: QuantumTerminalProps, ref){
+  function QuantumTerminalComponent({ files, activeFile, onRun, onRunningChange, theme = "dark" }: QuantumTerminalProps, ref){
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const lineBufferRef = useRef<string>('');
   const cursorPosRef = useRef<number>(0);
-  const executeCodeRef = useRef<(command: string) => void>(() => {});
+  const runFileRef = useRef<(file: string) => void>(() => {});
   const lastCursorRowRef = useRef<number>(0);
   const undoStackRef = useRef<{ text: string; cursor: number }[]>([]);
   const historyRef = useRef<string[]>([]);
@@ -78,6 +82,11 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
   const termWriteRef = useRef<(text: string) => void>(() => {});
   const termClearRef = useRef<() => void>(() => {});
   const onRunCallbackRef = useRef(onRun);
+  const onRunningChangeRef = useRef(onRunningChange);
+  // A program is running: keystrokes go to its stdin, not the command line.
+  const runningRef = useRef(false);
+  const programInputRef = useRef('');
+  const atLineStartRef = useRef(true);
 
   // keep these refs current without remounting the terminal
   useEffect(() => {
@@ -90,12 +99,19 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
   }, [onRun]);
 
   useEffect(() => {
+    onRunningChangeRef.current = onRunningChange;
+  }, [onRunningChange]);
+
+  useEffect(() => {
     filesRef.current = files;
   }, [files]);
  
   useImperativeHandle(ref, () => ({
     runFile: (file: string) => {
-      executeCodeRef.current(`qrun ${file}`)
+      runFileRef.current(file);
+    },
+    stop: () => {
+      if (runningRef.current) socketManager.stopScript();
     },
     clear: () => {
       termClearRef.current?.();
@@ -146,8 +162,8 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
 
     const getPrompt = () => (activeFileRef.current ? `[${activeFileRef.current}] $ ` : '$ ');
 
-    term.writeln('\x1b[36mQuantum Terminal\x1b[0m  v2.0.4');
-    term.writeln('Type `quantum <file>.sa` or `qrun <file>.sa` to run a program. Type `help` for shortcuts.');
+    term.writeln(`\x1b[36mQuantum Terminal\x1b[0m  ${env.APP_VERSION}`);
+    term.writeln('Type `quantum <file>` (e.g. `quantum main.sa` or `quantum ruby_demo.rb`) to run. Type `help` for shortcuts.');
     term.writeln('');
     term.write(getPrompt());
 
@@ -248,8 +264,17 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       return null;
     };
 
-    // Execute code directly in the terminal (not via prompt)
-    const executeCode = (command: string) => {
+    const setRunning = (running: boolean) => {
+      runningRef.current = running;
+      programInputRef.current = '';
+      setIsExecuting(running);
+      onRunningChangeRef.current?.(running);
+    };
+
+    // Starts a `qrun <file>` / `quantum <file>` command. Returns true when a
+    // program started; otherwise it has printed why and the caller shows the
+    // prompt again.
+    const executeCode = (command: string): boolean => {
       const parts = command.trim().split(/\s+/);
       const action = parts[0].toLowerCase();
       const fileName = parts[1];
@@ -257,14 +282,12 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       // Validate command
       if (action !== 'quantum' && action !== 'qrun') {
         term.writeln(`Unknown command: ${action}`);
-        term.write(getPrompt());
-        return;
+        return false;
       }
 
       if (!fileName) {
-        term.writeln(`Usage: ${action} <filename>.sa`);
-        term.write(getPrompt());
-        return;
+        term.writeln(`Usage: ${action} <filename> (e.g. main.sa, script.rb)`);
+        return false;
       }
 
       // Find the file in workspace (supports relative paths like src/main.sa)
@@ -272,8 +295,7 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
 
       if (!filePath) {
         term.writeln(`File not found: ${fileName}`);
-        term.write(getPrompt());
-        return;
+        return false;
       }
 
       // Keep the prompt label in sync with the file actually being run.
@@ -284,49 +306,98 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       activeFileRef.current = filePath;
 
       onRunCallbackRef.current?.(filePath);
-      socketManager.stopScript();
 
       // Get the code from the files ref (uses current editor contents)
       if(lastRunFileRef.current && lastRunFileRef.current !== filePath){
         term.clear();
       }
-      
+
       lastRunFileRef.current = filePath;
 
-      setIsExecuting(true);
       const code = filesRef.current[filePath] || '';
 
       // Check for empty file
       if (!code.trim()) {
         term.writeln('\x1b[33mWarning: File is empty\x1b[0m');
         term.writeln(`\x1b[31mExecution failed: ${filePath}\x1b[0m`);
-        setIsExecuting(false);
-        term.write(getPrompt());
-        return;
+        return false;
       }
 
-      // Execute via socket (connects automatically if needed)
-      const ext = filePath.slice(filePath.lastIndexOf('.'));
-      socketManager.runScript(code, ext);
+      // Execute via socket (connects automatically if needed). The extension
+      // decides the rules: .cpp/.c are checked as strict C/C++, .sa is lenient.
+      const ext = filePath.includes('.') ? filePath.slice(filePath.lastIndexOf('.')) : '.sa';
+      setRunning(true);
+      atLineStartRef.current = true;
+      socketManager.runScript(code, ext, filePath);
+      return true;
     };
 
     // Setup output streaming from socket manager
     socketManager.onOutputReceived = (text: string) => {
-      // Check if output ends with a prompt signal (from process_completion)
-      if (text.includes('[Process Completed]')) {
-        setIsExecuting(false);
-        // Don't write the completion message, just ensure prompt shows
-        term.write('\r\n' + getPrompt());
-        return;
-      }
-
       // Check for connection messages in debug mode
       if (text.includes('Connected to Quantum Server')) {
         return; // Skip the connection message
       }
 
+      atLineStartRef.current = /\n(\x1b\[0m)?$/.test(text);
       if (termWriteRef.current) {
         termWriteRef.current(text);
+      }
+    };
+
+    // The program ended: say how, then give the prompt back.
+    socketManager.onProcessExit = (exit: ProcessExit) => {
+      if (!runningRef.current) return;
+      setRunning(false);
+      if (!atLineStartRef.current) term.write('\r\n');
+      if (exit.disconnected) {
+        term.writeln(`\x1b[31mLost connection to the execution server (${env.WS_URL}).\x1b[0m`);
+      } else if (exit.stopped) {
+        term.writeln('\x1b[33mProcess stopped.\x1b[0m');
+      } else if (exit.stage === 'compile') {
+        term.writeln('\x1b[31mCompilation failed.\x1b[0m');
+      } else if (exit.exitCode !== 0 && exit.exitCode !== null) {
+        term.writeln(`\x1b[33mProcess exited with code ${exit.exitCode}.\x1b[0m`);
+      }
+      atLineStartRef.current = true;
+      lastCursorRowRef.current = 0;
+      lineBufferRef.current = '';
+      cursorPosRef.current = 0;
+      term.write(getPrompt());
+    };
+
+    // Keystrokes while a program runs are its stdin: echoed locally and sent
+    // a line at a time, like a real terminal in cooked mode.
+    const handleProgramInput = (data: string) => {
+      const code = data.charCodeAt(0);
+      if (code === 3) {
+        term.write('^C\r\n');
+        atLineStartRef.current = true;
+        socketManager.stopScript();
+      } else if (code === 12) {
+        term.clear();
+      } else if (code === 127) {
+        if (programInputRef.current.length > 0) {
+          programInputRef.current = programInputRef.current.slice(0, -1);
+          term.write('\b \b');
+        }
+      } else if (data.startsWith('\x1b')) {
+        // arrows and other escape sequences: no line editing for program input
+      } else {
+        const lines = data.split(/\r\n|\r|\n/);
+        lines.forEach((text, idx) => {
+          const printable = text.replace(/[\x00-\x1f\x7f]/g, '');
+          programInputRef.current += printable;
+          term.write(printable);
+          if (idx < lines.length - 1) {
+            socketManager.sendInput(programInputRef.current + '\n');
+            programInputRef.current = '';
+            term.write('\r\n');
+            atLineStartRef.current = true;
+          } else if (printable) {
+            atLineStartRef.current = false;
+          }
+        });
       }
     };
 
@@ -337,7 +408,7 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       term.write('\r\n');
       lastCursorRowRef.current = 0;
 
-      const parts = command.split(/\s+/);
+      let started = false;
 
       if (command === 'clear') {
         term.clear();
@@ -353,11 +424,11 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
         const parts = command.split(/\s+/);
         if ((parts[0] === 'quantum' || parts[0] === 'qrun') && parts[1]) {
           // Execute code directly
-          executeCode(command);
+          started = executeCode(command);
         } else {
           // Print the command echo first, then the help message
           term.writeln(command);
-          term.writeln(`Type \`quantum <file>.sa\` or \`qrun <file>.sa\` to run.`);
+          term.writeln(`Type \`quantum <file>\` or \`qrun <file>\` to run (e.g. main.sa, ruby_demo.rb).`);
         }
       }
 
@@ -379,7 +450,23 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       lineBufferRef.current = '';
       cursorPosRef.current = 0;
       undoStackRef.current = [];
-      term.write(getPrompt());
+      // A running program gets the prompt back when it exits.
+      if (!started) term.write(getPrompt());
+    };
+
+    // The editor's RUN button: shown as if the command had been typed.
+    runFileRef.current = (file: string) => {
+      if (runningRef.current) {
+        if (!atLineStartRef.current) term.write('\r\n');
+      } else {
+        lineBufferRef.current = '';
+        cursorPosRef.current = 0;
+        redrawLine();
+      }
+      const command = `qrun ${file}`;
+      term.write(runningRef.current ? `${getPrompt()}${command}\r\n` : `${command}\r\n`);
+      lastCursorRowRef.current = 0;
+      if (!executeCode(command)) term.write(getPrompt());
     };
 
     term.attachCustomKeyEventHandler((event) => {
@@ -405,6 +492,11 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
     });
 
     term.onData((data) => {
+      if (runningRef.current) {
+        handleProgramInput(data);
+        return;
+      }
+
       const code = data.charCodeAt(0);
 
       if (data === '\r') {
@@ -529,13 +621,31 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
     // Update refs for output streaming
     termWriteRef.current = (text: string) => term.write(text);
     termClearRef.current = () => term.clear();
-    executeCodeRef.current = executeCode;
 
     const handleResize = () => fitAddon.fit();
     window.addEventListener('resize', handleResize);
 
     const resizeObserver = new ResizeObserver(() => fitAddon.fit());
     resizeObserver.observe(containerRef.current);
+
+    // FIX: Trackpad two-finger scroll — intercept wheel events on the terminal
+    // container and route them directly into xterm's buffer. Without this,
+    // browsers fire a DOM wheel event that travels up to the page scroller
+    // because the xterm canvas element is not a native scrollable element.
+    // We call stopPropagation() + preventDefault() to prevent page scroll,
+    // then manually drive xterm with scrollLines() for a smooth, natural feel.
+    const handleWheel = (e: WheelEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const term = termRef.current;
+      if (!term) return;
+      // deltaY > 0 → scroll down (positive lines), < 0 → scroll up
+      // Use a sensitivity factor of 3 lines per 100px of deltaY for
+      // a feel consistent with native terminal emulators.
+      const lines = Math.round((e.deltaY / 100) * 3) || (e.deltaY > 0 ? 1 : -1);
+      term.scrollLines(lines);
+    };
+    containerRef.current.addEventListener('wheel', handleWheel, { passive: false });
 
     const textareaEl = containerRef.current.querySelector('.xterm-helper-textarea');
     const handleFocus = () => setIsFocused(true);
@@ -547,15 +657,18 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
       clearTimeout(loadingTimer);
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      containerRef.current?.removeEventListener('wheel', handleWheel);
       textareaEl?.removeEventListener('focus', handleFocus);
       textareaEl?.removeEventListener('blur', handleBlur);
+      socketManager.onOutputReceived = null;
+      socketManager.onProcessExit = null;
       term.dispose();
       termRef.current = null;
     };
   }, [theme]);
 
   return (
-    <div className="relative h-full w-full p-[2px] overflow-hidden rounded-md">
+    <div className="relative h-full w-full p-0.5 overflow-hidden rounded-md">
       <div
         className={cn(
           "pointer-events-none absolute -inset-[40%] transition-opacity duration-300",
@@ -570,7 +683,19 @@ const QuantumTerminal =  forwardRef<QuantumTerminalHandle, QuantumTerminalProps>
         "relative h-full w-full rounded-md overflow-hidden",
         theme === "dark" ? "bg-[#0D1117]" : "bg-white"
       )}>
-        <div ref={containerRef} className="h-full w-full" />
+        <div
+          ref={containerRef}
+          className="h-full w-full"
+          style={{
+            // FIX: Prevent trackpad scroll from escaping the xterm viewport
+            // and scrolling the outer page. 'touch-action: none' stops the
+            // browser's own touch/trackpad scroll handling on this element,
+            // while 'overscroll-behavior: contain' ensures scroll chaining
+            // is blocked even if a wheel event reaches this container.
+            touchAction: 'none',
+            overscrollBehavior: 'contain',
+          }}
+        />
         {isLoading && (
           <div className={cn(
             "absolute inset-0 flex items-center justify-center",

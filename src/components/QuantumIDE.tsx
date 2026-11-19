@@ -5,38 +5,13 @@ import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Terminal, Cpu, Maximize2, Minimize2, Copy, Download, Save, Check, Play, 
-  Folder, Plus, FileCode, Trash2, Menu, X 
+  Folder, Plus, FileCode, Trash2, Menu, X, Square
 } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { atomDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useTheme } from '../contexts/ThemeContext';
 import { cn } from '../lib/utils';
-
-function levenshteinDistance(left: string, right: string) {
-  if (!left.length) return right.length;
-  if (!right.length) return left.length;
-
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  const current = new Array(right.length + 1).fill(0);
-
-  for (let i = 1; i <= left.length; i++) {
-    current[0] = i;
-    for (let j = 1; j <= right.length; j++) {
-      const substitutionCost = left[i - 1] === right[j - 1] ? 0 : 1;
-      current[j] = Math.min(
-        previous[j] + 1,
-        current[j - 1] + 1,
-        previous[j - 1] + substitutionCost,
-      );
-    }
-    for (let j = 0; j <= right.length; j++) {
-      previous[j] = current[j];
-    }
-  }
-
-  return previous[right.length];
-}
-
+import { env } from '../config/env';
 
 export const QuantumIDE = () => {
   const { theme } = useTheme();
@@ -57,6 +32,23 @@ export const QuantumIDE = () => {
     }
     return {
       'main.sa': starterScript,
+      'ruby_demo.rb': `# Ruby Dialect in Quantum
+def greet(name)
+    puts "Hello, " + name + "! Welcome to Quantum."
+end
+
+def factorial(n)
+    if n <= 1
+        1
+    else
+        n * factorial(n - 1)
+    end
+end
+
+greet("Developer")
+puts "Factorial of 5:"
+puts factorial(5)
+`,
       'utils.sa': `// String distance utility
       fn checkSimilarity(string s1, string s2) {
         int distance = levenshtein(s1, s2);
@@ -131,17 +123,29 @@ srv.start();`
 
   // Keep the line-number gutter's scroll position in sync with the
   // textarea AND the syntax-highlighted overlay.
+  //
+  // ROOT CAUSE OF THE "CODE TEXT STAYS FROZEN" BUG:
+  // The SyntaxHighlighter <pre> element has overflowY:'hidden' in its
+  // customStyle. Setting pre.scrollTop on an overflow-hidden element has
+  // ZERO visual effect — the element refuses to scroll vertically.
+  // The WRAPPER div (preRef.current) uses overflow-hidden on the CSS class
+  // level, but overflow:hidden elements CAN be scrolled programmatically
+  // via JavaScript (they just don't show a scrollbar or respond to user
+  // input). So:
+  //   - Vertical sync → preRef.current.scrollTop  (the wrapper div)
+  //   - Horizontal sync → pre.scrollLeft          (the inner <pre>, which
+  //                                                has overflowX:'auto')
   const handleScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
     const { scrollTop, scrollLeft } = e.currentTarget;
-    
-    if (preRef.current) {
-  const pre = preRef.current.querySelector("pre");
 
-  if (pre) {
-    pre.scrollTop = scrollTop;
-    pre.scrollLeft = scrollLeft;
-  }
-}
+    if (preRef.current) {
+      // Vertical: scroll the wrapper so the <pre> content shifts into view
+      preRef.current.scrollTop = scrollTop;
+      // Horizontal: scroll the inner <pre> which owns horizontal overflow
+      const pre = preRef.current.querySelector('pre');
+      if (pre) pre.scrollLeft = scrollLeft;
+    }
+
     if (lineNumRef.current) {
       lineNumRef.current.scrollTop = scrollTop;
     }
@@ -161,7 +165,6 @@ srv.start();`
 
     measurer.textContent = currentLineTextBeforeCaret;
     const caretX = measurer.offsetWidth;
-    const editorRect = editor.getBoundingClientRect();
 const scrollWidth = editor.scrollWidth;
 const clientWidth = editor.clientWidth;
 
@@ -232,14 +235,13 @@ if (caretAbsoluteX > visibleRight - bufferX) {
     }
 
     scrollCaretIntoView();
-   if (preRef.current) {
-  const pre = preRef.current.querySelector("pre");
-
-  if (pre) {
-    pre.scrollTop = editor.scrollTop;
-    pre.scrollLeft = editor.scrollLeft;
-  }
-}
+    // Sync the overlay and gutter using the same vertical-on-wrapper,
+    // horizontal-on-inner-pre strategy (see handleScroll comment above).
+    if (preRef.current) {
+      preRef.current.scrollTop = editor.scrollTop;
+      const pre = preRef.current.querySelector('pre');
+      if (pre) pre.scrollLeft = editor.scrollLeft;
+    }
     if (lineNumRef.current) {
       lineNumRef.current.scrollTop = editor.scrollTop;
     }
@@ -254,20 +256,20 @@ if (caretAbsoluteX > visibleRight - bufferX) {
 
     const editor = editorRef.current;
 
-    
-
     scrollCaretIntoView();
 
     const { scrollTop, scrollLeft } = editor;
 
+    // Sync overlay and gutter — vertical on wrapper, horizontal on inner pre.
     if (preRef.current) {
- 
+      preRef.current.scrollTop = scrollTop;
+      const pre = preRef.current.querySelector('pre');
+      if (pre) pre.scrollLeft = scrollLeft;
+    }
 
-  preRef.current.scrollTop = scrollTop;
-  preRef.current.scrollLeft = scrollLeft;
-
- 
-}
+    if (lineNumRef.current) {
+      lineNumRef.current.scrollTop = scrollTop;
+    }
   });
 };
 
@@ -328,22 +330,23 @@ if (caretAbsoluteX > visibleRight - bufferX) {
     setTimeout(() => setIsSaving(false), 1000);
   };
 
-  const runCode = async () => {
-    setIsExecuting(true);
-    terminalRef.current?.runFile(activeFile);
-    setTimeout(() => setIsExecuting(false), 500);
+  // RUN starts the active file; while it runs the same button stops it.
+  // isExecuting follows the terminal, which knows when the program exits.
+  const runCode = () => {
+    if (isExecuting) terminalRef.current?.stop();
+    else terminalRef.current?.runFile(activeFile);
   };
 
   const createFile = () => {
     if (!newFileName) return;
     
     const hasValidExt =
-    newFileName.endsWith('.sa') ||
-    newFileName.endsWith('.js') ||
-    newFileName.endsWith('.py') ||
-    newFileName.endsWith('.cpp') ||
-    newFileName.endsWith('.rb') ||
-    newFileName.endsWith('.c');
+      newFileName.endsWith('.sa') ||
+      newFileName.endsWith('.js') ||
+      newFileName.endsWith('.py') ||
+      newFileName.endsWith('.rb') ||
+      newFileName.endsWith('.cpp') ||
+      newFileName.endsWith('.c');
     const name = hasValidExt ? newFileName : `${newFileName}.sa`;
     
     if (files[name]) { alert('File already exists'); return; }
@@ -351,6 +354,7 @@ if (caretAbsoluteX > visibleRight - bufferX) {
     let defaultContent = '// New Quantum Script\n';
     if (name.endsWith('.js')) defaultContent = '// New JavaScript File\nconsole.log("Hello from JS!");\n';
     if (name.endsWith('.py')) defaultContent = '# New Python File\nprint("Hello from Python!")\n';
+    if (name.endsWith('.rb')) defaultContent = '# New Ruby File\nputs "Hello from Ruby in Quantum!"\n';
     if (name.endsWith('.cpp')) defaultContent = '#include <iostream>\n\nint main() {\n    std::cout << "Hello from C++!" << std::endl;\n    return 0;\n}\n';
     if (name.endsWith('.rb')) defaultContent = '# New Ruby File\nputs "Hello from Ruby!"\n';
     if (name.endsWith('.c')) defaultContent = '#include <stdio.h>\n\nint main() {\n    printf("Hello from C!\\n");\n    return 0;\n}\n';
@@ -358,6 +362,14 @@ if (caretAbsoluteX > visibleRight - bufferX) {
     setActiveFile(name);
     setNewFileName('');
     setIsCreateModalOpen(false);
+  };
+
+  const getHighlightLanguage = (fileName: string) => {
+    if (fileName.endsWith('.rb')) return 'ruby';
+    if (fileName.endsWith('.py')) return 'python';
+    if (fileName.endsWith('.cpp') || fileName.endsWith('.c')) return 'cpp';
+    if (fileName.endsWith('.js')) return 'javascript';
+    return 'javascript';
   };
 
   const deleteFile = (fileName: string) => {
@@ -393,10 +405,10 @@ if (caretAbsoluteX > visibleRight - bufferX) {
 
         <div className={cn(
           "bg-white dark:bg-[#0d1117] rounded-2xl border border-black/10 dark:border-white/10 overflow-hidden shadow-[0_0_50px_-12px_rgba(0,0,0,0.1)] dark:shadow-[0_0_50px_-12px_rgba(6,182,212,0.15)] flex flex-col transition-all duration-500",
-          isFullScreen ? "fixed inset-0 z-[100] rounded-none h-screen" : "h-[600px] md:h-[800px]"
+          isFullScreen ? "fixed inset-0 z-100 rounded-none h-screen" : "h-150 md:h-200"
         )}>
           {/* Header */}
-          <div className="flex items-center justify-between px-4 md:px-6 py-3 bg-[#f8fafc] dark:bg-[#161b22] border-b border-black/10 dark:border-white/10">
+          <div className="flex items-center justify-between px-4 md:px-6 py-3 bg-quantum-light dark:bg-[#161b22] border-b border-black/10 dark:border-white/10">
             <div className="flex items-center gap-4 md:gap-6">
               <motion.button 
                 onClick={() => setIsSidebarOpen(!isSidebarOpen)}
@@ -426,8 +438,8 @@ if (caretAbsoluteX > visibleRight - bufferX) {
               <div className="flex items-center gap-2 md:gap-3 text-[10px] md:text-xs text-black/40 dark:text-white/40 font-mono">
                 <div className="flex items-center gap-2 px-2 py-1 rounded bg-black/5 dark:bg-white/5">
                   <Terminal className="w-3 h-3" />
-                  <span className="hidden xs:inline text-cyan-500">quantum-cli v2.0.4</span>
-                  <span className="xs:hidden text-cyan-500">v2.0.4</span>
+                  <span className="hidden xs:inline text-cyan-500">quantum-cli {env.APP_VERSION}</span>
+                  <span className="xs:hidden text-cyan-500">{env.APP_VERSION}</span>
                 </div>
                 <div className="hidden lg:flex items-center gap-2 px-2 py-1 rounded bg-black/5 dark:bg-white/5">
                   <Cpu className="w-3 h-3" />
@@ -470,16 +482,17 @@ if (caretAbsoluteX > visibleRight - bufferX) {
                 <div className="w-px h-4 bg-black/10 dark:bg-white/10 mx-1 hidden sm:block" />
                 <button 
                   onClick={runCode}
-                  disabled={isExecuting}
                   className={cn(
-                    "flex items-center gap-2 px-4 md:px-6 py-2 rounded-lg text-[10px] md:text-xs font-bold transition-all shadow-lg shadow-cyan-500/20",
-                    isExecuting 
-                      ? "bg-black/10 dark:bg-white/10 text-black/40 dark:text-white/40 cursor-not-allowed" 
-                      : "bg-cyan-500 text-black hover:bg-cyan-400 active:scale-95 hover:shadow-cyan-500/40"
+                    "flex items-center gap-2 px-4 md:px-6 py-2 rounded-lg text-[10px] md:text-xs font-bold transition-all shadow-lg",
+                    isExecuting
+                      ? "bg-red-500 text-white shadow-red-500/20 hover:bg-red-400 active:scale-95"
+                      : "bg-cyan-500 text-black shadow-cyan-500/20 hover:bg-cyan-400 active:scale-95 hover:shadow-cyan-500/40"
                   )}
                 >
-                  <Play className={cn("w-3 h-3 fill-current", isExecuting ? "animate-pulse" : "")} />
-                  {isExecuting ? 'RUNNING...' : 'RUN SCRIPT'}
+                  {isExecuting
+                    ? <Square className="w-3 h-3 fill-current animate-pulse" />
+                    : <Play className="w-3 h-3 fill-current" />}
+                  {isExecuting ? 'STOP' : 'RUN SCRIPT'}
                 </button>
                 <div className="w-px h-4 bg-black/10 dark:bg-white/10 mx-1 hidden sm:block" />
                 <button 
@@ -501,7 +514,7 @@ if (caretAbsoluteX > visibleRight - bufferX) {
           <div className="flex flex-1 overflow-hidden relative">
             {/* Sidebar */}
             <div className={cn(
-              "absolute md:relative inset-y-0 left-0 z-20 w-64 bg-[#f8fafc] dark:bg-[#0d1117] border-r border-black/10 dark:border-white/10 flex flex-col transition-all duration-300 shadow-2xl md:shadow-none",
+              "absolute md:relative inset-y-0 left-0 z-20 w-64 bg-quantum-light dark:bg-[#0d1117] border-r border-black/10 dark:border-white/10 flex flex-col transition-all duration-300 shadow-2xl md:shadow-none",
               isSidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0 md:w-0 md:opacity-0"
             )}>
               <div className="p-4 flex items-center justify-between border-b border-black/5 dark:border-white/5">
@@ -582,7 +595,7 @@ if (caretAbsoluteX > visibleRight - bufferX) {
                   {/* Line Numbers */}
                   <div 
                     ref={lineNumRef}
-                    className="w-10 md:w-14 bg-[#f8fafc] dark:bg-[#0d1117] border-r border-black/5 dark:border-white/5 flex flex-col items-end pt-4 md:pt-5 pr-2 md:pr-3 select-none font-mono text-[10px] md:text-[11px] text-black/20 dark:text-white/20 overflow-hidden"
+                    className="w-10 md:w-14 bg-quantum-light dark:bg-[#0d1117] border-r border-black/5 dark:border-white/5 flex flex-col items-end pt-4 md:pt-5 pr-2 md:pr-3 select-none font-mono text-[10px] md:text-[11px] text-black/20 dark:text-white/20 overflow-hidden"
                   >
                     {lineNumbers.map(n => (
                       <div key={n} className="h-[19.2px] md:h-[22.4px] leading-[19.2px] md:leading-[22.4px] flex items-center">
@@ -613,10 +626,10 @@ if (caretAbsoluteX > visibleRight - bufferX) {
                     />
                     <div 
                       ref={preRef}
-                      className="absolute inset-0 p-4 md:p-5 font-mono text-xs md:text-sm pointer-events-none overflow-auto leading-[1.6]"
+                      className="absolute inset-0 p-4 md:p-5 font-mono text-xs md:text-sm pointer-events-none overflow-hidden leading-[1.6]"
                     >
                       <SyntaxHighlighter
-                        language="javascript"
+                        language={getHighlightLanguage(activeFile)}
                         style={theme === 'dark' ? atomDark : undefined}
                         customStyle={{
   background: 'transparent',
@@ -648,7 +661,7 @@ if (caretAbsoluteX > visibleRight - bufferX) {
               </div>
               
               {/* Terminal Section (Replaced inner mapped output with QuantumTerminal) */}
-              <div className="h-40 md:h-56 bg-[#f8fafc] dark:bg-black border-t border-black/10 dark:border-white/10 flex flex-col transition-colors duration-300">
+              <div className="h-40 md:h-56 bg-quantum-light dark:bg-black border-t border-black/10 dark:border-white/10 flex flex-col transition-colors duration-300">
                 <div className="px-4 md:px-6 py-2 bg-black/5 dark:bg-white/5 border-b border-black/5 dark:border-white/5 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <Terminal className="w-3.5 h-3.5 text-cyan-500" />
@@ -664,8 +677,22 @@ if (caretAbsoluteX > visibleRight - bufferX) {
                 </div>
 
                 {/* NEW XTERM WEBSOCKET TERMINAL */}
-                <div className="flex-1 w-full h-full overflow-hidden bg-transparent">
-                  <QuantumTerminal ref={terminalRef} files={files} activeFile={activeFile} />
+                <div
+                  className="flex-1 w-full h-full overflow-hidden bg-transparent"
+                  style={{
+                    // FIX: Block scroll chaining from the terminal upward into
+                    // the page. When the xterm wheel handler consumes scroll,
+                    // this boundary prevents any residual deltaY from reaching
+                    // the outer page scroll container.
+                    overscrollBehavior: 'contain',
+                  }}
+                >
+                  <QuantumTerminal
+                    ref={terminalRef}
+                    files={files}
+                    activeFile={activeFile}
+                    onRunningChange={setIsExecuting}
+                  />
                 </div>
 
                 {/* ORIGINAL FALLBACK OUTPUT (Commented out to preserve official code)
@@ -674,7 +701,7 @@ if (caretAbsoluteX > visibleRight - bufferX) {
                     <div className="space-y-2">
                       <div className="flex items-center gap-2 text-black/30 dark:text-white/30">
                         <span className="text-cyan-500">➜</span>
-                        <span>Quantum Runtime Environment [Version 2.0.4]</span>
+                        <span>Quantum Runtime Environment [Version {env.APP_VERSION.replace(/^v/, '')}]</span>
                       </div>
                       <div className="flex items-center gap-2 text-black/20 dark:text-white/20 italic">
                         <span className="text-cyan-500">➜</span>
@@ -716,12 +743,12 @@ if (caretAbsoluteX > visibleRight - bufferX) {
 
       {/* Create File Modal */}
       {isCreateModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-6">
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/60 backdrop-blur-sm p-6">
           <div className="bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 rounded-2xl p-6 w-full max-w-md shadow-2xl">
             <h3 className="text-xl font-bold text-black dark:text-white mb-4">Create New File</h3>
             <input 
               type="text"
-              placeholder="filename.sa"
+              placeholder="filename.sa or script.rb"
               value={newFileName}
               onChange={(e) => setNewFileName(e.target.value)}
               className="w-full bg-black/5 dark:bg-black border border-black/10 dark:border-white/10 rounded-xl px-4 py-3 text-black dark:text-white mb-6 outline-none focus:border-cyan-500 transition-colors"
